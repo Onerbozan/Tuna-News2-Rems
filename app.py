@@ -33,7 +33,6 @@ st.markdown("---")
 # --- VERİ BAĞLANTISI VE OTOMATİK SÜTUN SENKRONİZASYONU ---
 conn = st.connection("gsheets", type=GSheetsConnection)
 
-# Sistemde olması gereken tüm sütunların ana listesi
 REQUIRED_COLUMNS = [
     "Kayit_Tarihi", "Kaydeden", "Protokol_No", "Ad_Soyad", "Yas", "Cinsiyet", 
     "Sikayet", "Komorbiditeler", "KOAH_Oykusu", "SBP", "Nabiz", 
@@ -46,23 +45,18 @@ def load_data():
     try:
         df = conn.read(ttl=0) 
         
-        # 1. Senaryo: Tablo tamamen boşsa sıfırdan oluştur
         if df.empty or len(df.columns) == 0:
             df_bos = pd.DataFrame(columns=REQUIRED_COLUMNS)
             conn.update(data=df_bos)
             return df_bos
             
-        # 2. Senaryo: Tablo dolu ama koda yeni sütunlar eklenmişse (Otomatik Yama)
         eksik_sutunlar = [col for col in REQUIRED_COLUMNS if col not in df.columns]
         if eksik_sutunlar:
             for col in eksik_sutunlar:
-                df[col] = "" # Eksik sütunları boş olarak tabloya ekle
-            
-            # Sütunları doğru sıraya diz ve Google Sheet'i arka planda güncelle
+                df[col] = "" 
             df = df[REQUIRED_COLUMNS + [c for c in df.columns if c not in REQUIRED_COLUMNS]]
             conn.update(data=df)
             
-        # Protokol No'yu güvenli formata çevir (Mükerrer kontrolü için)
         if 'Protokol_No' in df.columns:
             df['Protokol_No'] = df['Protokol_No'].astype(str).str.replace(r'\.0$', '', regex=True).str.strip()
         
@@ -219,21 +213,12 @@ with tab1:
             temiz_isim = str(isim).strip()
             sistemdeki_protokoller = [str(x).split('.')[0].strip() for x in df['Protokol_No'].tolist()]
 
-            # 11 Hane ve Sadece Rakam Kontrolü
             if len(temiz_protokol) != 11 or not temiz_protokol.isdigit():
                 uyari_alani.error("❌ Lütfen tam 11 haneli ve sadece rakamlardan oluşan bir TC Kimlik No giriniz.")
             elif not temiz_isim:
                 uyari_alani.error("❌ Lütfen Hasta Adı Soyadı bilgisini giriniz.")
             elif temiz_protokol in sistemdeki_protokoller:
                 uyari_alani.error(f"❌ HATA: '{temiz_protokol}' numaralı TC daha önce kaydedilmiş! Lütfen numarayı kontrol edin.")
-                st.markdown("""
-                    <style>
-                    div[data-testid="stTextInput"] input[aria-label="Hasta TC Kimlik No*"] {
-                        border: 2px solid red !important;
-                        background-color: #fff0f0 !important;
-                    }
-                    </style>
-                """, unsafe_allow_html=True)
             else:
                 news2_val = calc_news2(rr, spo2, koah, o2_destegi, sbp, hr, gcs, ates)
                 rems_val = calc_rems(yas, hr, rr, sbp, gcs, spo2)
@@ -261,12 +246,125 @@ with tab1:
                 time.sleep(2.5) 
                 st.rerun()
 
+# ==========================================
+# SEKME 2: KLİNİK TAKİP
+# ==========================================
 with tab2:
-    st.info("Burası Taburculuk ve Mortalite takip alanı olacak.")
+    st.subheader("BÖLÜM 4: Klinik Sonlanımlar ve Takip")
+    if not df.empty:
+        search_list = (df['Protokol_No'] + " - " + df['Ad_Soyad']).tolist()
+        choice = st.selectbox("Takip Girişi İçin Hasta Seçin:", ["Seçiniz..."] + search_list)
+        
+        if choice != "Seçiniz...":
+            t_id = choice.split(" - ")[0]
+            row = df[df['Protokol_No'] == t_id].iloc[0]
+            idx = df.index[df['Protokol_No'] == t_id][0]
+            
+            with st.form("follow_form"):
+                karar_ops = ["Bilinmiyor", "Acil servisten taburculuk", "Hastaneye yatış (Normal Servis)", "Yoğun Bakım Ünitesine (YBÜ) Doğrudan Yatış"]
+                karar_idx = karar_ops.index(row['Nihai_Karar']) if row['Nihai_Karar'] in karar_ops else 0
+                karar = st.selectbox("1. Acil Servis Nihai Kararı (Disposition)", karar_ops, index=karar_idx)
+                
+                c_f1, c_f2 = st.columns(2)
+                mevcut_gun = int(row['Yatis_Gunu']) if pd.notna(row['Yatis_Gunu']) and str(row['Yatis_Gunu']).isdigit() else 0
+                y_gun = c_f1.number_input("Toplam Hastanede Kalış Süresi (Gün)", min_value=0, max_value=365, value=mevcut_gun)
+                
+                yb_ops = ["Bilinmiyor", "Hayır", "Evet"]
+                yb_idx = yb_ops.index(row['YB_Ihtiyaci']) if row['YB_Ihtiyaci'] in yb_ops else 0
+                yb = c_f2.selectbox("İlk 24 Saat İçinde Sekonder YBÜ Yatış İhtiyacı?", yb_ops, index=yb_idx)
+                
+                mort_ops = ["Bilinmiyor", "Şifa / Haliyle Taburculuk", "Hastane İçi Mortalite (Eksitus)"]
+                mort_idx = mort_ops.index(row['Mortalite']) if row['Mortalite'] in mort_ops else 0
+                mort = st.selectbox("3. Nihai Hastane İçi Akıbet (Mortalite)", mort_ops, index=mort_idx)
+                
+                if st.form_submit_button("Takip Verilerini Güncelle"):
+                    df.at[idx, 'Nihai_Karar'] = karar
+                    df.at[idx, 'Yatis_Gunu'] = y_gun
+                    df.at[idx, 'YB_Ihtiyaci'] = yb
+                    df.at[idx, 'Mortalite'] = mort
+                    
+                    conn.update(data=df)
+                    st.cache_data.clear()
+                    st.success("✅ Takip verileri güncellendi.")
+                    st.rerun()
+
+# ==========================================
+# SEKME 3: İZLEM PANELİ
+# ==========================================
 with tab3:
-    st.info("Burası tıpkı önceki projedeki gibi düzenlenebilir Excel tablosu olacak.")
+    st.subheader("Vaka Kontrol ve Hızlı Düzenleme Paneli")
+    st.info("💡 Tablodaki hücrelere çift tıklayarak verileri değiştirebilirsiniz. Değiştirilemeyen kilitli sütunlar gri renktedir.")
+    
+    if not df.empty:
+        df_view = df.copy()
+        
+        def get_status(r):
+            if r['Nihai_Karar'] == "Bilinmiyor" or r['Mortalite'] == "Bilinmiyor": return "🔴 Eksik"
+            return "🟢 Tamam"
+        
+        df_view.insert(0, 'Durum', df_view.apply(get_status, axis=1))
+        display_cols = ['Durum'] + REQUIRED_COLUMNS
+        
+        edited_df = st.data_editor(
+            df_view[display_cols],
+            use_container_width=True,
+            hide_index=True,
+            disabled=["Durum", "Kayit_Tarihi", "Kaydeden", "Protokol_No", "NEWS2_Skoru", "REMS_Skoru"]
+        )
+        
+        if st.button("💾 Değişiklikleri Kaydet ve Skorları Güncelle"):
+            for idx, row in edited_df.iterrows():
+                for col in REQUIRED_COLUMNS:
+                    df.at[idx, col] = row[col]
+                
+                # Tablodan vital değerler değiştirilmişse skoru otonom olarak tekrar hesapla
+                try:
+                    df.at[idx, 'NEWS2_Skoru'] = calc_news2(
+                        int(row['Solunum_Sayisi']), int(row['SpO2']), row['KOAH_Oykusu'], 
+                        row['O2_Destegi'], int(row['SBP']), int(row['Nabiz']), 
+                        int(row['GCS']), float(row['Ates'])
+                    )
+                    df.at[idx, 'REMS_Skoru'] = calc_rems(
+                        int(row['Yas']), int(row['Nabiz']), int(row['Solunum_Sayisi']), 
+                        int(row['SBP']), int(row['GCS']), int(row['SpO2'])
+                    )
+                except:
+                    pass 
+                    
+            conn.update(data=df)
+            st.cache_data.clear()
+            st.success("✅ Tüm veriler kaydedildi!")
+            st.rerun()
+
+# ==========================================
+# SEKME 4: RAPORLAR VE YEDEKLEME
+# ==========================================
 with tab4:
-    st.info("Burası istatistikler ve bilgisayara indirme alanı olacak.")
+    st.subheader("📊 Araştırma İstatistikleri ve Yedekleme")
+    if not df.empty:
+        toplam_hasta = len(df)
+        eksik_veri = len(df[(df['Nihai_Karar'] == "Bilinmiyor") | (df['Mortalite'] == "Bilinmiyor")])
+        tamam_veri = toplam_hasta - eksik_veri
+        
+        col_m1, col_m2, col_m3 = st.columns(3)
+        col_m1.metric("Toplam Kaydedilen Hasta", f"{toplam_hasta} Kişi")
+        col_m2.metric("Takibi Biten", f"{tamam_veri} Kişi")
+        col_m3.metric("Eksik Takip", f"{eksik_veri} Kişi", delta="-Tamamlanmalı", delta_color="inverse")
+        
+        st.divider()
+        st.markdown("### 💾 Veritabanını Bilgisayara İndir (Yedek Al)")
+        
+        csv_data = df.to_csv(index=False).encode('utf-8-sig')
+        dosya_adi = f"NEWS2_REMS_Veriler_{datetime.now().strftime('%d_%m_%Y')}.csv"
+        
+        st.download_button(
+            label="📥 Tüm Verileri İndir (Excel/CSV Formatında)",
+            data=csv_data,
+            file_name=dosya_adi,
+            mime="text/csv"
+        )
+    else:
+        st.info("Sistemde henüz hasta bulunmamaktadır.")
 
 # --- ÇIKIŞ ---
 st.markdown("---")
