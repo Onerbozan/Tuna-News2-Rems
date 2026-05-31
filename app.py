@@ -30,44 +30,59 @@ if not st.session_state.logged_in:
 st.markdown(f"### 👤 Hoş geldin, **{st.session_state.username.capitalize()}**")
 st.markdown("---")
 
-# --- VERİ BAĞLANTISI VE OTOMATİK SÜTUN OLUŞTURMA ---
+# --- VERİ BAĞLANTISI VE OTOMATİK SÜTUN SENKRONİZASYONU ---
 conn = st.connection("gsheets", type=GSheetsConnection)
+
+# Sistemde olması gereken tüm sütunların ana listesi
+REQUIRED_COLUMNS = [
+    "Kayit_Tarihi", "Kaydeden", "Protokol_No", "Ad_Soyad", "Yas", "Cinsiyet", 
+    "Sikayet", "Komorbiditeler", "KOAH_Oykusu", "SBP", "Nabiz", 
+    "Solunum_Sayisi", "Ates", "SpO2", "GCS", "O2_Destegi", 
+    "NEWS2_Skoru", "REMS_Skoru", "Nihai_Karar", "Yatis_Gunu", 
+    "YB_Ihtiyaci", "Mortalite"
+]
 
 def load_data():
     try:
         df = conn.read(ttl=0) 
+        
+        # 1. Senaryo: Tablo tamamen boşsa sıfırdan oluştur
         if df.empty or len(df.columns) == 0:
-            df_bos = pd.DataFrame(columns=[
-                "Kayit_Tarihi", "Kaydeden", "Protokol_No", "Yas", "Cinsiyet", 
-                "Sikayet", "Komorbiditeler", "KOAH_Oykusu", "SBP", "Nabiz", 
-                "Solunum_Sayisi", "Ates", "SpO2", "GCS", "O2_Destegi", 
-                "NEWS2_Skoru", "REMS_Skoru", "Nihai_Karar", "Yatis_Gunu", 
-                "YB_Ihtiyaci", "Mortalite"
-            ])
+            df_bos = pd.DataFrame(columns=REQUIRED_COLUMNS)
             conn.update(data=df_bos)
             return df_bos
             
+        # 2. Senaryo: Tablo dolu ama koda yeni sütunlar eklenmişse (Otomatik Yama)
+        eksik_sutunlar = [col for col in REQUIRED_COLUMNS if col not in df.columns]
+        if eksik_sutunlar:
+            for col in eksik_sutunlar:
+                df[col] = "" # Eksik sütunları boş olarak tabloya ekle
+            
+            # Sütunları doğru sıraya diz ve Google Sheet'i arka planda güncelle
+            df = df[REQUIRED_COLUMNS + [c for c in df.columns if c not in REQUIRED_COLUMNS]]
+            conn.update(data=df)
+            
+        # Protokol No'yu güvenli formata çevir (Mükerrer kontrolü için)
         if 'Protokol_No' in df.columns:
             df['Protokol_No'] = df['Protokol_No'].astype(str).str.replace(r'\.0$', '', regex=True).str.strip()
+        
         return df
     except Exception as e:
         st.error(f"⚠️ Bağlantı hatası: {e}")
         st.stop()
-        return pd.DataFrame()
+        return pd.DataFrame(columns=REQUIRED_COLUMNS)
 
 df = load_data()
 
 # --- HESAPLAMA FONKSİYONLARI ---
 def calc_news2(rr, spo2, is_coah, o2_support, sbp, hr, gcs, temp):
     score = 0
-    # Solunum Sayısı
     if rr <= 8: score += 3
     elif 9 <= rr <= 11: score += 1
     elif 12 <= rr <= 20: score += 0
     elif 21 <= rr <= 24: score += 2
     elif rr >= 25: score += 3
 
-    # SpO2 (KOAH durumuna göre Skala 1 veya Skala 2)
     if is_coah == "Evet":
         if spo2 <= 83: score += 3
         elif 84 <= spo2 <= 85: score += 2
@@ -83,17 +98,14 @@ def calc_news2(rr, spo2, is_coah, o2_support, sbp, hr, gcs, temp):
         elif 94 <= spo2 <= 95: score += 1
         elif spo2 >= 96: score += 0
 
-    # O2 Desteği
     if o2_support != "Oda Havası": score += 2
 
-    # Sistolik Kan Basıncı
     if sbp <= 90: score += 3
     elif 91 <= sbp <= 100: score += 2
     elif 101 <= sbp <= 110: score += 1
     elif 111 <= sbp <= 219: score += 0
     elif sbp >= 220: score += 3
 
-    # Nabız
     if hr <= 40: score += 3
     elif 41 <= hr <= 50: score += 1
     elif 51 <= hr <= 90: score += 0
@@ -101,11 +113,9 @@ def calc_news2(rr, spo2, is_coah, o2_support, sbp, hr, gcs, temp):
     elif 111 <= hr <= 130: score += 2
     elif hr >= 131: score += 3
 
-    # Bilinç (GCS 15 = Alert(0), GCS < 15 = CVPU(3))
     if gcs == 15: score += 0
     else: score += 3
 
-    # Ateş
     if temp <= 35.0: score += 3
     elif 35.1 <= temp <= 36.0: score += 1
     elif 36.1 <= temp <= 38.0: score += 0
@@ -116,14 +126,12 @@ def calc_news2(rr, spo2, is_coah, o2_support, sbp, hr, gcs, temp):
 
 def calc_rems(age, hr, rr, sbp, gcs, spo2):
     score = 0
-    # Yaş
     if age < 45: score += 0
     elif 45 <= age <= 54: score += 2
     elif 55 <= age <= 64: score += 3
     elif 65 <= age <= 74: score += 5
     elif age > 74: score += 6
 
-    # Nabız
     if hr > 179: score += 4
     elif 140 <= hr <= 179: score += 3
     elif 110 <= hr <= 139: score += 2
@@ -132,7 +140,6 @@ def calc_rems(age, hr, rr, sbp, gcs, spo2):
     elif 40 <= hr <= 53: score += 3
     elif hr < 40: score += 4
 
-    # Solunum Sayısı
     if rr > 49: score += 4
     elif 35 <= rr <= 49: score += 3
     elif 25 <= rr <= 34: score += 1
@@ -141,21 +148,18 @@ def calc_rems(age, hr, rr, sbp, gcs, spo2):
     elif 6 <= rr <= 9: score += 2
     elif rr < 6: score += 4
 
-    # Sistolik Kan Basıncı
     if sbp > 179: score += 4
     elif 130 <= sbp <= 179: score += 3
     elif 90 <= sbp <= 129: score += 0
     elif 70 <= sbp <= 89: score += 2
     elif sbp < 70: score += 4
 
-    # GCS
     if gcs > 13: score += 0
     elif 11 <= gcs <= 13: score += 1
     elif 8 <= gcs <= 10: score += 2
     elif 5 <= gcs <= 7: score += 3
     elif gcs < 5: score += 4
 
-    # SpO2
     if spo2 > 89: score += 0
     elif 75 <= spo2 <= 89: score += 1
     elif spo2 < 75: score += 2
@@ -171,7 +175,7 @@ tab1, tab2, tab3, tab4 = st.tabs([
 ])
 
 # ==========================================
-# SEKME 1: YENİ HASTA KAYDI (Otomatik Skorlama)
+# SEKME 1: YENİ HASTA KAYDI
 # ==========================================
 with tab1:
     st.subheader("BÖLÜM 2 & 3: Demografik Bilgiler ve T0 Vitalleri")
@@ -180,10 +184,14 @@ with tab1:
     
     with st.form("new_reg", clear_on_submit=True):
         st.markdown("**1. Temel Bilgiler**")
-        c1, c2, c3 = st.columns(3)
-        protokol = c1.text_input("Protokol No / Hasta ID*")
-        yas = c2.number_input("Yaş*", min_value=65, max_value=120, value=65)
-        cinsiyet = c3.selectbox("Cinsiyet*", ["Erkek", "Kadın"])
+        
+        c_tc, c_isim = st.columns(2)
+        protokol = c_tc.text_input("Hasta TC Kimlik No*", max_chars=11)
+        isim = c_isim.text_input("Hasta Adı Soyadı*")
+        
+        c1, c2 = st.columns(2)
+        yas = c1.number_input("Yaş*", min_value=65, max_value=120, value=65)
+        cinsiyet = c2.selectbox("Cinsiyet*", ["Erkek", "Kadın"])
         
         sikayet = st.text_input("Ambulans Şikayeti / Ön Tanı")
         
@@ -208,15 +216,19 @@ with tab1:
 
         if st.form_submit_button("Hastayı Kaydet ve Skorları Hesapla"):
             temiz_protokol = str(protokol).strip()
+            temiz_isim = str(isim).strip()
             sistemdeki_protokoller = [str(x).split('.')[0].strip() for x in df['Protokol_No'].tolist()]
 
-            if not temiz_protokol:
-                uyari_alani.error("Lütfen Protokol No giriniz.")
+            # 11 Hane ve Sadece Rakam Kontrolü
+            if len(temiz_protokol) != 11 or not temiz_protokol.isdigit():
+                uyari_alani.error("❌ Lütfen tam 11 haneli ve sadece rakamlardan oluşan bir TC Kimlik No giriniz.")
+            elif not temiz_isim:
+                uyari_alani.error("❌ Lütfen Hasta Adı Soyadı bilgisini giriniz.")
             elif temiz_protokol in sistemdeki_protokoller:
-                uyari_alani.error(f"❌ HATA: '{temiz_protokol}' numaralı Protokol daha önce kaydedilmiş! Lütfen numarayı kontrol edin.")
+                uyari_alani.error(f"❌ HATA: '{temiz_protokol}' numaralı TC daha önce kaydedilmiş! Lütfen numarayı kontrol edin.")
                 st.markdown("""
                     <style>
-                    div[data-testid="stTextInput"] input[aria-label="Protokol No / Hasta ID*"] {
+                    div[data-testid="stTextInput"] input[aria-label="Hasta TC Kimlik No*"] {
                         border: 2px solid red !important;
                         background-color: #fff0f0 !important;
                     }
@@ -225,13 +237,14 @@ with tab1:
             else:
                 news2_val = calc_news2(rr, spo2, koah, o2_destegi, sbp, hr, gcs, ates)
                 rems_val = calc_rems(yas, hr, rr, sbp, gcs, spo2)
-                
                 komorbid_str = ", ".join(komorbiditeler) if komorbiditeler else "Yok"
 
                 new_row = pd.DataFrame([{
                     "Kayit_Tarihi": datetime.now().strftime("%d/%m/%Y %H:%M"),
                     "Kaydeden": st.session_state.username,
-                    "Protokol_No": temiz_protokol, "Yas": yas, "Cinsiyet": cinsiyet, 
+                    "Protokol_No": temiz_protokol,
+                    "Ad_Soyad": temiz_isim.upper(), 
+                    "Yas": yas, "Cinsiyet": cinsiyet, 
                     "Sikayet": sikayet, "Komorbiditeler": komorbid_str, "KOAH_Oykusu": koah, 
                     "SBP": sbp, "Nabiz": hr, "Solunum_Sayisi": rr, "Ates": ates, 
                     "SpO2": spo2, "GCS": gcs, "O2_Destegi": o2_destegi, 
