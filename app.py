@@ -2,6 +2,7 @@ import streamlit as st
 from streamlit_gsheets import GSheetsConnection
 import pandas as pd
 from datetime import datetime
+import time
 
 # --- SAYFA AYARLARI ---
 st.set_page_config(page_title="NEWS2 & REMS Çalışması", layout="wide")
@@ -35,7 +36,6 @@ conn = st.connection("gsheets", type=GSheetsConnection)
 def load_data():
     try:
         df = conn.read(ttl=0) 
-        # TABLO BOŞSA VEYA SÜTUN YOKSA OTOMATİK OLUŞTUR
         if df.empty or len(df.columns) == 0:
             df_bos = pd.DataFrame(columns=[
                 "Kayit_Tarihi", "Kaydeden", "Protokol_No", "Yas", "Cinsiyet", 
@@ -44,11 +44,9 @@ def load_data():
                 "NEWS2_Skoru", "REMS_Skoru", "Nihai_Karar", "Yatis_Gunu", 
                 "YB_Ihtiyaci", "Mortalite"
             ])
-            # Sütunları Google Sheets'e yazdırıyoruz
             conn.update(data=df_bos)
             return df_bos
             
-        # Protokol No'yu güvenli formata çevir (Mükerrer kontrolü için)
         if 'Protokol_No' in df.columns:
             df['Protokol_No'] = df['Protokol_No'].astype(str).str.replace(r'\.0$', '', regex=True).str.strip()
         return df
@@ -59,6 +57,111 @@ def load_data():
 
 df = load_data()
 
+# --- HESAPLAMA FONKSİYONLARI ---
+def calc_news2(rr, spo2, is_coah, o2_support, sbp, hr, gcs, temp):
+    score = 0
+    # Solunum Sayısı
+    if rr <= 8: score += 3
+    elif 9 <= rr <= 11: score += 1
+    elif 12 <= rr <= 20: score += 0
+    elif 21 <= rr <= 24: score += 2
+    elif rr >= 25: score += 3
+
+    # SpO2 (KOAH durumuna göre Skala 1 veya Skala 2)
+    if is_coah == "Evet":
+        if spo2 <= 83: score += 3
+        elif 84 <= spo2 <= 85: score += 2
+        elif 86 <= spo2 <= 87: score += 1
+        elif 88 <= spo2 <= 92: score += 0
+        elif spo2 >= 93 and o2_support == "Oda Havası": score += 0
+        elif 93 <= spo2 <= 94 and o2_support != "Oda Havası": score += 1
+        elif 95 <= spo2 <= 96 and o2_support != "Oda Havası": score += 2
+        elif spo2 >= 97 and o2_support != "Oda Havası": score += 3
+    else:
+        if spo2 <= 91: score += 3
+        elif 92 <= spo2 <= 93: score += 2
+        elif 94 <= spo2 <= 95: score += 1
+        elif spo2 >= 96: score += 0
+
+    # O2 Desteği
+    if o2_support != "Oda Havası": score += 2
+
+    # Sistolik Kan Basıncı
+    if sbp <= 90: score += 3
+    elif 91 <= sbp <= 100: score += 2
+    elif 101 <= sbp <= 110: score += 1
+    elif 111 <= sbp <= 219: score += 0
+    elif sbp >= 220: score += 3
+
+    # Nabız
+    if hr <= 40: score += 3
+    elif 41 <= hr <= 50: score += 1
+    elif 51 <= hr <= 90: score += 0
+    elif 91 <= hr <= 110: score += 1
+    elif 111 <= hr <= 130: score += 2
+    elif hr >= 131: score += 3
+
+    # Bilinç (GCS 15 = Alert(0), GCS < 15 = CVPU(3))
+    if gcs == 15: score += 0
+    else: score += 3
+
+    # Ateş
+    if temp <= 35.0: score += 3
+    elif 35.1 <= temp <= 36.0: score += 1
+    elif 36.1 <= temp <= 38.0: score += 0
+    elif 38.1 <= temp <= 39.0: score += 1
+    elif temp >= 39.1: score += 2
+
+    return score
+
+def calc_rems(age, hr, rr, sbp, gcs, spo2):
+    score = 0
+    # Yaş
+    if age < 45: score += 0
+    elif 45 <= age <= 54: score += 2
+    elif 55 <= age <= 64: score += 3
+    elif 65 <= age <= 74: score += 5
+    elif age > 74: score += 6
+
+    # Nabız
+    if hr > 179: score += 4
+    elif 140 <= hr <= 179: score += 3
+    elif 110 <= hr <= 139: score += 2
+    elif 70 <= hr <= 109: score += 0
+    elif 54 <= hr <= 69: score += 2
+    elif 40 <= hr <= 53: score += 3
+    elif hr < 40: score += 4
+
+    # Solunum Sayısı
+    if rr > 49: score += 4
+    elif 35 <= rr <= 49: score += 3
+    elif 25 <= rr <= 34: score += 1
+    elif 12 <= rr <= 24: score += 0
+    elif 10 <= rr <= 11: score += 1
+    elif 6 <= rr <= 9: score += 2
+    elif rr < 6: score += 4
+
+    # Sistolik Kan Basıncı
+    if sbp > 179: score += 4
+    elif 130 <= sbp <= 179: score += 3
+    elif 90 <= sbp <= 129: score += 0
+    elif 70 <= sbp <= 89: score += 2
+    elif sbp < 70: score += 4
+
+    # GCS
+    if gcs > 13: score += 0
+    elif 11 <= gcs <= 13: score += 1
+    elif 8 <= gcs <= 10: score += 2
+    elif 5 <= gcs <= 7: score += 3
+    elif gcs < 5: score += 4
+
+    # SpO2
+    if spo2 > 89: score += 0
+    elif 75 <= spo2 <= 89: score += 1
+    elif spo2 < 75: score += 2
+
+    return score
+
 # --- SEKMELER ---
 tab1, tab2, tab3, tab4 = st.tabs([
     "➕ 1. Yeni Kayıt (Vitaller)", 
@@ -67,8 +170,84 @@ tab1, tab2, tab3, tab4 = st.tabs([
     "📈 4. Raporlar & Yedek"
 ])
 
+# ==========================================
+# SEKME 1: YENİ HASTA KAYDI (Otomatik Skorlama)
+# ==========================================
 with tab1:
-    st.info("Burası Yeni Hasta Kayıt alanı olacak. NEWS2 ve REMS skorları burada otomatik hesaplanacak.")
+    st.subheader("BÖLÜM 2 & 3: Demografik Bilgiler ve T0 Vitalleri")
+    
+    uyari_alani = st.empty()
+    
+    with st.form("new_reg", clear_on_submit=True):
+        st.markdown("**1. Temel Bilgiler**")
+        c1, c2, c3 = st.columns(3)
+        protokol = c1.text_input("Protokol No / Hasta ID*")
+        yas = c2.number_input("Yaş*", min_value=65, max_value=120, value=65)
+        cinsiyet = c3.selectbox("Cinsiyet*", ["Erkek", "Kadın"])
+        
+        sikayet = st.text_input("Ambulans Şikayeti / Ön Tanı")
+        
+        komorbiditeler = st.multiselect(
+            "Komorbiditeler (Birden fazla seçilebilir)", 
+            ["HT", "DM", "KAH", "KKY", "SVO", "KBY", "Malignite", "Diğer"]
+        )
+        koah = st.selectbox("KOAH / Hiperkapnik Solunum Yetmezliği Öyküsü var mı? (NEWS2 için kritik)", ["Hayır", "Evet"])
+        
+        st.markdown("---")
+        st.markdown("**2. T0 - Başvuru Anı Vital Bulguları**")
+        v1, v2, v3, v4 = st.columns(4)
+        sbp = v1.number_input("Sistolik Kan Basıncı (mmHg)", value=120)
+        hr = v2.number_input("Nabız / KTA (vuru/dk)", value=80)
+        rr = v3.number_input("Solunum Sayısı (nefes/dk)", value=16)
+        ates = v4.number_input("Vücut Sıcaklığı (°C)", value=36.5, step=0.1, format="%.1f")
+        
+        v5, v6, v7 = st.columns(3)
+        spo2 = v5.number_input("Oksijen Saturasyonu (SpO2 %)", value=95)
+        gcs = v6.number_input("Bilinç Durumu (GCS)", min_value=3, max_value=15, value=15)
+        o2_destegi = v7.selectbox("Oksijen Desteği Durumu", ["Oda Havası", "Oksijen Alıyor"])
+
+        if st.form_submit_button("Hastayı Kaydet ve Skorları Hesapla"):
+            temiz_protokol = str(protokol).strip()
+            sistemdeki_protokoller = [str(x).split('.')[0].strip() for x in df['Protokol_No'].tolist()]
+
+            if not temiz_protokol:
+                uyari_alani.error("Lütfen Protokol No giriniz.")
+            elif temiz_protokol in sistemdeki_protokoller:
+                uyari_alani.error(f"❌ HATA: '{temiz_protokol}' numaralı Protokol daha önce kaydedilmiş! Lütfen numarayı kontrol edin.")
+                st.markdown("""
+                    <style>
+                    div[data-testid="stTextInput"] input[aria-label="Protokol No / Hasta ID*"] {
+                        border: 2px solid red !important;
+                        background-color: #fff0f0 !important;
+                    }
+                    </style>
+                """, unsafe_allow_html=True)
+            else:
+                news2_val = calc_news2(rr, spo2, koah, o2_destegi, sbp, hr, gcs, ates)
+                rems_val = calc_rems(yas, hr, rr, sbp, gcs, spo2)
+                
+                komorbid_str = ", ".join(komorbiditeler) if komorbiditeler else "Yok"
+
+                new_row = pd.DataFrame([{
+                    "Kayit_Tarihi": datetime.now().strftime("%d/%m/%Y %H:%M"),
+                    "Kaydeden": st.session_state.username,
+                    "Protokol_No": temiz_protokol, "Yas": yas, "Cinsiyet": cinsiyet, 
+                    "Sikayet": sikayet, "Komorbiditeler": komorbid_str, "KOAH_Oykusu": koah, 
+                    "SBP": sbp, "Nabiz": hr, "Solunum_Sayisi": rr, "Ates": ates, 
+                    "SpO2": spo2, "GCS": gcs, "O2_Destegi": o2_destegi, 
+                    "NEWS2_Skoru": news2_val, "REMS_Skoru": rems_val, 
+                    "Nihai_Karar": "Bilinmiyor", "Yatis_Gunu": 0, 
+                    "YB_Ihtiyaci": "Bilinmiyor", "Mortalite": "Bilinmiyor"
+                }])
+                
+                updated = pd.concat([df, new_row], ignore_index=True)
+                conn.update(data=updated)
+                st.cache_data.clear()
+                
+                uyari_alani.success(f"✅ Kayıt Başarılı! Hesaplanan Skorlar 👉 NEWS2: **{news2_val}** | REMS: **{rems_val}**")
+                time.sleep(2.5) 
+                st.rerun()
+
 with tab2:
     st.info("Burası Taburculuk ve Mortalite takip alanı olacak.")
 with tab3:
